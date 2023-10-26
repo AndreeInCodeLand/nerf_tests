@@ -23,6 +23,7 @@ gpus = tf.config.experimental.list_physical_devices('GPU')
 print("Num GPUs Available: ", len(gpus))
 print("Tensorflow version: ", tf.__version__)
 
+
 # Set memory growth for each GPU
 # for gpu in gpus:
 #     tf.config.experimental.set_memory_growth(gpu, True)
@@ -586,9 +587,6 @@ def train():
 
     parser = config_parser()
     args = parser.parse_args()
-
-    # initialize logger
-    summary_writer = tf.summary.create_file_writer(args.basedir)
     
     if args.random_seed is not None:
         print('Fixing random seed', args.random_seed)
@@ -817,6 +815,30 @@ def train():
 
         #####  Core optimization loop  #####
 
+        # with tf.GradientTape() as tape:
+
+        #     # Make predictions for color, disparity, accumulated opacity.
+        #     rgb, disp, acc, extras = render(
+        #         H, W, focal, chunk=args.chunk, rays=batch_rays,
+        #         verbose=i < 10, retraw=True, **render_kwargs_train)
+
+        #     # Compute MSE loss between predicted and true RGB.
+        #     img_loss = img2mse(rgb, target_s)
+        #     trans = extras['raw'][..., -1]
+        #     loss = img_loss
+        #     psnr = mse2psnr(img_loss)
+
+        #     # Add MSE loss for coarse-grained model
+        #     if 'rgb0' in extras:
+        #         img_loss0 = img2mse(extras['rgb0'], target_s)
+        #         loss += img_loss0
+        #         psnr0 = mse2psnr(img_loss0)
+
+        # gradients = tape.gradient(loss, grad_vars)
+        # optimizer.apply_gradients(zip(gradients, grad_vars))
+
+        # dt = time.time()-time0
+
         with tf.GradientTape() as tape:
 
             # Make predictions for color, disparity, accumulated opacity.
@@ -824,119 +846,100 @@ def train():
                 H, W, focal, chunk=args.chunk, rays=batch_rays,
                 verbose=i < 10, retraw=True, **render_kwargs_train)
 
-            # Compute MSE loss between predicted and true RGB.
-            img_loss = img2mse(rgb, target_s)
-            trans = extras['raw'][..., -1]
-            loss = img_loss
-            psnr = mse2psnr(img_loss)
+            # Check for NaN values in the results
+            has_nans = (tf.math.is_finite(rgb).numpy().all() and
+                        tf.math.is_finite(disp).numpy().all() and
+                        tf.math.is_finite(acc).numpy().all())
+                # Define loss variable here
+            loss = 0.0
+            trans = None
 
-            # Add MSE loss for coarse-grained model
-            if 'rgb0' in extras:
-                img_loss0 = img2mse(extras['rgb0'], target_s)
-                loss += img_loss0
-                psnr0 = mse2psnr(img_loss0)
+            if not has_nans:
 
-        gradients = tape.gradient(loss, grad_vars)
-        optimizer.apply_gradients(zip(gradients, grad_vars))
+                # Continue processing because all tensors are valid
+                # Compute MSE loss between predicted and true RGB.
+                img_loss = img2mse(rgb, target_s)
+                trans = extras['raw'][..., -1]
+                loss = img_loss
+                psnr = mse2psnr(img_loss)
 
-        dt = time.time()-time0
+                # Calculate PSNR for coarse-grained model
+                if 'rgb0' in extras:
+                    img_loss0 = img2mse(extras['rgb0'], target_s)
+                    loss += img_loss0
+                    psnr0 = mse2psnr(img_loss0)
 
-        #####           end            #####
+                gradients = tape.gradient(loss, grad_vars)
+                optimizer.apply_gradients(zip(gradients, grad_vars))
 
-        # Rest is logging
+                dt = time.time() - time0
+                print('iter time {:.05f}'.format(dt))
 
-        def save_weights(net, prefix, i):
-            path = os.path.join(
-                basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
-            np.save(path, net.get_weights())
-            print('saved weights at', path)
+            else:
+                # Handle the case where at least one tensor has NaN values
+                print("Skipping iteration due to NaN values in tensors.")
+                psnr = tf.constant(0.0)  # Set PSNR to 0
 
-        if i % args.i_weights == 0:
-            for k in models:
-                save_weights(models[k], k, i)
+            # Calculate and use psnr0 here if needed
 
-        if i % args.i_video == 0 and i > 0:
+            #####           end            #####
 
-            rgbs, disps = render_path(
-                render_poses, hwf, args.chunk, render_kwargs_test)
-            print('Done, saving', rgbs.shape, disps.shape)
-            moviebase = os.path.join(
-                basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
-            imageio.mimwrite(moviebase + 'rgb.mp4',
-                             to8b(rgbs), fps=30, quality=8)
-            imageio.mimwrite(moviebase + 'disp.mp4',
-                             to8b(disps / np.max(disps)), fps=30, quality=8)
+            # Rest is logging
 
-            if args.use_viewdirs:
-                render_kwargs_test['c2w_staticcam'] = render_poses[0][:3, :4]
-                rgbs_still, _ = render_path(
+            def save_weights(net, prefix, i):
+                path = os.path.join(
+                    basedir, expname, '{}_{:06d}.npy'.format(prefix, i))
+                np.save(path, net.get_weights())
+                print('saved weights at', path)
+
+            if i % args.i_weights == 0:
+                for k in models:
+                    save_weights(models[k], k, i)
+
+            if i % args.i_video == 0 and i > 0:
+
+                rgbs, disps = render_path(
                     render_poses, hwf, args.chunk, render_kwargs_test)
-                render_kwargs_test['c2w_staticcam'] = None
-                imageio.mimwrite(moviebase + 'rgb_still.mp4',
-                                 to8b(rgbs_still), fps=30, quality=8)
+                print('Done, saving', rgbs.shape, disps.shape)
+                moviebase = os.path.join(
+                    basedir, expname, '{}_spiral_{:06d}_'.format(expname, i))
+                imageio.mimwrite(moviebase + 'rgb.mp4',
+                                to8b(rgbs), fps=30, quality=8)
+                imageio.mimwrite(moviebase + 'disp.mp4',
+                                to8b(disps / np.max(disps)), fps=30, quality=8)
 
-        if i % args.i_testset == 0 and i > 0:
-            testsavedir = os.path.join(
-                basedir, expname, 'testset_{:06d}'.format(i))
-            os.makedirs(testsavedir, exist_ok=True)
-            print('test poses shape', poses[i_test].shape)
-            render_path(poses[i_test], hwf, args.chunk, render_kwargs_test,
-                        gt_imgs=images[i_test], savedir=testsavedir)
-            print('Saved test set')
+                if args.use_viewdirs:
+                    render_kwargs_test['c2w_staticcam'] = render_poses[0][:3, :4]
+                    rgbs_still, _ = render_path(
+                        render_poses, hwf, args.chunk, render_kwargs_test)
+                    render_kwargs_test['c2w_staticcam'] = None
+                    imageio.mimwrite(moviebase + 'rgb_still.mp4',
+                                    to8b(rgbs_still), fps=30, quality=8)
 
-        if i % args.i_print == 0 or i < 10:
+            if i % args.i_testset == 0 and i > 0:
+                testsavedir = os.path.join(
+                    basedir, expname, 'testset_{:06d}'.format(i))
+                os.makedirs(testsavedir, exist_ok=True)
+                print('test poses shape', poses[i_test].shape)
+                render_path(poses[i_test], hwf, args.chunk, render_kwargs_test,
+                            gt_imgs=images[i_test], savedir=testsavedir)
+                print('Saved test set')
 
-            print(expname, i, psnr.numpy(), loss.numpy(), global_step.numpy())
-            print('iter time {:.05f}'.format(dt))
-
-            # Use the tf.summary record_if context manager with a condition
-            if i % args.i_print == 0:
-                with summary_writer.as_default():
-                    tf.summary.scalar('loss', loss, step=global_step)
-                    tf.summary.scalar('psnr', psnr, step=global_step)
-                    tf.summary.histogram('tran', trans, step=global_step)
-                    if args.N_importance > 0:
-                        tf.summary.scalar('psnr0', psnr0, step=global_step)
-
-            if i % args.i_img == 0:
-                # Log a rendered validation view to Tensorboard
-                img_i = np.random.choice(i_val)
-                target = images[img_i]
-                pose = poses[img_i, :3, :4]
-
-                rgb, disp, acc, extras = render(H, W, focal, chunk=args.chunk, c2w=pose, **render_kwargs_test)
-
-                psnr = mse2psnr(img2mse(rgb, target))
-                
-                # # Save out the validation image for Tensorboard-free monitoring
-                # testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
-                # if i == 0:
-                #     os.makedirs(testimgdir, exist_ok=True)    
-                # imageio.imwrite(os.path.join(testimgdir, '{:06d}.png'.format(i)), to8b(rgb))
+            if i % args.i_print == 0 or i < 10:
+                print(expname, i, str(psnr), str(loss), str(global_step))
+                # print('iter time {:.05f}'.format(dt))
 
 
-                # Define the directory for saving validation images with double backslashes
-                testimgdir = os.path.join(basedir, expname, 'tboard_val_imgs')
-                testimgdir = testimgdir.replace('/', '\\')  # Replace forward slashes with backslashes
-                os.makedirs(testimgdir, exist_ok=True)  # Create the directory if it doesn't exist
-
-                # Save out the validation image for Tensorboard-free monitoring
-                imageio.imwrite(os.path.join(testimgdir, '{:06d}.png'.format(i)), to8b(rgb))
-
-                with summary_writer.as_default():
-                    tf.summary.image('rgb', to8b(rgb)[tf.newaxis], step=global_step)
-                    tf.summary.image('disp', disp[tf.newaxis, ..., tf.newaxis], step=global_step)
-                    tf.summary.image('acc', acc[tf.newaxis, ..., tf.newaxis], step=global_step)
-                    tf.summary.scalar('psnr_holdout', psnr, step=global_step)
-                    tf.summary.image('rgb_holdout', target[tf.newaxis], step=global_step)
-
-                if args.N_importance > 0:
-                    with summary_writer.as_default():
-                        tf.summary.image('rgb0', to8b(extras['rgb0'])[tf.newaxis], step=global_step)
-                        tf.summary.image('disp0', extras['disp0'][tf.newaxis, ..., tf.newaxis], step=global_step)
-                        tf.summary.image('z_std', extras['z_std'][tf.newaxis, ..., tf.newaxis], step=global_step)
+                if trans is not None:
+                    with tf.summary.record_if(i % args.i_print == 0):
+                        tf.summary.scalar(name='loss', data=loss, step=tf.compat.v1.train.get_or_create_global_step())
+                        tf.summary.scalar(name='psnr', data=psnr, step=tf.compat.v1.train.get_or_create_global_step())
+                        tf.summary.histogram(name='tran', data=trans, step=tf.compat.v1.train.get_or_create_global_step())
+                        if args.N_importance > 0:
+                            tf.summary.scalar(name='psnr0', data=psnr0, step=tf.compat.v1.train.get_or_create_global_step())
 
             global_step.assign_add(1)
+
 
 if __name__ == '__main__':
     train()

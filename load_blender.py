@@ -7,21 +7,21 @@ import json
 
 
 
-trans_t = lambda t : tf.convert_to_tensor([
+trans_t = lambda t : tf.convert_to_tensor(value=[
     [1,0,0,0],
     [0,1,0,0],
     [0,0,1,t],
     [0,0,0,1],
 ], dtype=tf.float32)
 
-rot_phi = lambda phi : tf.convert_to_tensor([
+rot_phi = lambda phi : tf.convert_to_tensor(value=[
     [1,0,0,0],
     [0,tf.cos(phi),-tf.sin(phi),0],
     [0,tf.sin(phi), tf.cos(phi),0],
     [0,0,0,1],
 ], dtype=tf.float32)
 
-rot_theta = lambda th : tf.convert_to_tensor([
+rot_theta = lambda th : tf.convert_to_tensor(value=[
     [tf.cos(th),0,-tf.sin(th),0],
     [0,1,0,0],
     [tf.sin(th),0, tf.cos(th),0],
@@ -59,8 +59,11 @@ def load_blender_data(basedir, half_res=False, testskip=1):
             
         for frame in meta['frames'][::skip]:
             fname = os.path.join(basedir, frame['file_path'] + '.png')
-            imgs.append(imageio.imread(fname))
-            poses.append(np.array(frame['transform_matrix']))
+            if os.path.exists(fname):
+                imgs.append(imageio.imread(fname))
+                poses.append(np.array(frame['transform_matrix']))
+            else:
+                print(f"Image {fname} does not exist. Skipping.")
         imgs = (np.array(imgs) / 255.).astype(np.float32) # keep all 4 channels (RGBA)
         poses = np.array(poses).astype(np.float32)
         counts.append(counts[-1] + imgs.shape[0])
@@ -79,7 +82,7 @@ def load_blender_data(basedir, half_res=False, testskip=1):
     render_poses = tf.stack([pose_spherical(angle, -30.0, 4.0) for angle in np.linspace(-180,180,40+1)[:-1]],0)
     
     if half_res:
-        imgs = tf.image.resize_area(imgs, [400, 400]).numpy()
+        imgs = tf.image.resize(imgs, [400, 400], method=tf.image.ResizeMethod.AREA).numpy()
         H = H//2
         W = W//2
         focal = focal/2.
